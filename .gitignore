@@ -9,3 +9,4 @@ workbuddy_activity_state.json
 __pycache__/
 *.pyc
 .env
+.workbuddy/
