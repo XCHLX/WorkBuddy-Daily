@@ -105,7 +105,7 @@ pip3 install requests
 | `BARK_URL` | ⬜ | 可选，Bark 推送（iOS），如 `https://api.day.app/xxxxxxxx` |
 | `WXPUSHER_APP_TOKEN` | ⬜ | 可选，WxPusher 应用令牌（`AT_` 开头），在 wxpusher.zjiecode.com 创建应用后获得 |
 | `WXPUSHER_UID` | ⬜ | 可选，WxPusher 用户 UID（`UID_` 开头），多个用逗号/分号分隔 |
-| `SERVERCHAN_SENDKEY` | ⬜ | 可选，Server酱 微信推送（[官网](https://sct.ftqq.com) 免费获取，免费额度每天 5 条）。`sctp` 开头的是方糖专属通道，脚本会自动切到对应域名 |
+| `SERVERCHAN_SENDKEY` | ⬜ | 可选，Server酱 微信推送（[官网](https://sct.ftqq.com) 免费获取，免费额度每天 5 条）。`sctp` 开头的是方糖专属通道，脚本会自动切到对应域名，不通时自动回退主域名 |
 | `WECOM_WEBHOOK` | ⬜ | 可选，企业微信群机器人 webhook（或仅 key） |
 | `DINGTALK_WEBHOOK` | ⬜ | 可选，钉钉群机器人 webhook（安全设置：自定义关键词或加签） |
 | `DINGTALK_SECRET` | ⬜ | 可选，钉钉加签密钥（机器人选「加签」时必填） |
@@ -296,7 +296,7 @@ python daily_forward.py daily.log --wx
 | `BARK_URL` | ⬜ | 可选，Bark 推送（iOS），如 `https://api.day.app/xxxxxxxx`（自建服务器换域名即可） |
 | `WXPUSHER_APP_TOKEN` | ⬜ | 可选，WxPusher 应用令牌（`AT_` 开头），[官网](https://wxpusher.zjiecode.com) 创建应用后获得 |
 | `WXPUSHER_UID` | ⬜ | 可选，WxPusher 用户 UID（`UID_` 开头，扫码关注后查看），多个用逗号/分号分隔 |
-| `SERVERCHAN_SENDKEY` | ⬜ | 可选，Server酱 微信推送（[官网](https://sct.ftqq.com) 免费获取，免费额度每天 5 条）。`sctp` 开头的 SendKey 会自动走方糖专属通道 |
+| `SERVERCHAN_SENDKEY` | ⬜ | 可选，Server酱 微信推送（[官网](https://sct.ftqq.com) 免费获取，免费额度每天 5 条）。`sctp` 开头的 SendKey 会自动走方糖专属通道，不通时自动回退主域名。**推送报连不上时，先跑 `python workbuddy_daily.py --test-notify` 自检**（能区分「运行环境出网问题」和「SendKey 不对」） |
 | `WECOM_WEBHOOK` | ⬜ | 可选，企业微信群机器人。填完整 webhook URL，或只填 key（自动补全域名） |
 | `DINGTALK_WEBHOOK` | ⬜ | 可选，钉钉群机器人。安全设置选「自定义关键词」时，标题里带该词即可；选「加签」则再加 `DINGTALK_SECRET` |
 | `DINGTALK_SECRET` | ⬜ | 可选，钉钉加签密钥（`SEC` 开头那串） |

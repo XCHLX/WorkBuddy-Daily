@@ -44,6 +44,7 @@
    python workbuddy_daily.py --mp-gap 15   mp 对话事件间隔（默认 45，上游反作弊要求真人节奏）
    python workbuddy_daily.py --tasks checkin,travel        只跑白名单子任务
    python workbuddy_daily.py --skip-tasks lottery,redeem  跳过指定子任务
+   python workbuddy_daily.py --test-notify    仅自检 Server酱 推送通道（排查连不上的问题）
 
 🔑 环境变量
    WORKBUDDY_REFRESH_TOKEN   【必填】多账号刷新令牌，换行分隔
@@ -150,6 +151,8 @@
    · 微信关注任务：需真人扫码关注满 24 小时，脚本识别并提示，不自动完成
    · 推送渠道：PushPlus / Bark / WxPusher / Server酱 / 企业微信 / 钉钉 / 青龙默认通知，配了哪个推哪个（都没配只提示）
      Server酱兼容 sctp 方糖专属通道（自动切到 {uid}.push.ft07.com），title 含换行会自动压成单行
+     Server酱 容错：网络错误自动重试，sctp 方糖通道不通时自动回退主域名 sctapi.ftqq.com；
+     推送报连不上时用 --test-notify 自检，可区分「环境出网问题」与「SendKey 不对」
      青龙通知同时兼容新版「应用授权」（QL_CLIENT_ID/QL_CLIENT_SECRET→/open/system/notify）
      与旧版 auth.json（含 2.18+ 的 data/config 数据目录）两种形态
    · 完全免费：无广告、无功能限制；如帮到你，欢迎在仓库 README「☕ 支持与投喂」请我喝杯咖啡
@@ -3521,35 +3524,91 @@ def _dingtalk_notify(title, content):
     return False
 
 
+def _serverchan_post(url, title, content, timeout=(10, 30)):
+    """向 Server酱 发一次 POST，返回 (成功, 错误说明)。
+
+    两个通道的响应格式不一样，判据要分开认：
+      · 主域名 sctapi.ftqq.com → {"code": 0, ...} 成功；失败用 message/info 字段
+      · 方糖域名 push.ft07.com  → {"code": 0, ...} 成功；失败用 error 字段（如 sendkey not found）
+    """
+    s = requests.Session(); s.trust_env = False
+    r = s.post(url, data={"title": title, "desp": content}, timeout=timeout, verify=False)
+    try:
+        d = r.json()
+    except Exception:
+        d = {}
+    if d.get("code") == 0:
+        return True, ""
+    # 5xx（如 Cloudflare 522）算服务端故障，值得换域名再试；
+    # 4xx 是业务错误（如 key 无效），换域名也没用，直接返回
+    if r.status_code >= 500:
+        return False, "HTTP %s（服务端异常）" % r.status_code
+    msg = str(d.get("message") or d.get("error") or d.get("info") or "")[:80]
+    return False, msg or ("HTTP %s" % r.status_code)
+
+
 def _serverchan_notify(title, content):
     """Server酱 推送（微信）；未配置 SERVERCHAN_SENDKEY 则跳过。
 
-    · SendKey 以 sctp 开头的是「方糖」专属通道，需走 https://{uid}.push.ft07.com/send/{key}.send
+    · SendKey 以 sctp 开头的是「方糖」专属通道，官方域名 https://{uid}.push.ft07.com/send/{key}.send
       （uid 取 SendKey 里 sctp 与 t 之间的数字）；其余走 sctapi.ftqq.com/{key}.send
+    · ⚠️ 方糖通道域名 push.ft07.com 常年 522/超时（实测卡满 20s 无响应），
+      因此方糖 key 会额外试一遍主域名 sctapi.ftqq.com 兜底
     · title 不能含换行，先压成单行；desp 支持 Markdown，原样发
     · 免费额度每天 5 条，脚本只在收尾汇总推一条，别挪到循环里
+    · 网络类错误（超时/连接重置/5xx）自动重试并降级到备用域名；
+      4xx 业务错误（如 key 错误）不重试，直接报出来
     """
     key = os.environ.get("SERVERCHAN_SENDKEY", "").strip()
     if not key:
         return False
-    if key.startswith("sctp"):
-        uid = re.sub(r"^sctp(\d+)t.*$", r"\1", key)
-        url = "https://%s.push.ft07.com/send/%s.send" % (uid, key)
-    else:
-        url = "https://sctapi.ftqq.com/%s.send" % key
     title = re.sub(r"[\r\n]+", " ", title).strip()   # title 不允许换行
     if len(content) > 30000:
         content = content[:30000] + "\n...(内容过长已截断)"
-    try:
-        s = requests.Session(); s.trust_env = False
-        r = s.post(url, data={"title": title, "desp": content}, timeout=20, verify=False)
-        d = r.json()
-        if d.get("code") == 0:
-            print("📢 Server酱 推送成功")
-            return True
-        print("📢 Server酱 推送失败: %s" % str(d.get("message", ""))[:80])
-    except Exception as e:
-        print("📢 Server酱 异常: %s" % str(e)[:80])
+
+    # 按优先级排候选地址：方糖 key 先方糖域名再主域名兜底，普通 key 只有主域名
+    urls = []
+    if key.startswith("sctp"):
+        uid = re.sub(r"^sctp(\d+)t.*$", r"\1", key)
+        urls.append("https://%s.push.ft07.com/send/%s.send" % (uid, key))
+        urls.append("https://sctapi.ftqq.com/%s.send" % key)
+    else:
+        urls.append("https://sctapi.ftqq.com/%s.send" % key)
+
+    last_err = ""
+    for url in urls:
+        host = re.sub(r"^https?://([^/]+).*$", r"\1", url)
+        for attempt in range(1, 3):
+            try:
+                ok, err = _serverchan_post(url, title, content)
+                if ok:
+                    print("📢 Server酱 推送成功（%s）" % host)
+                    return True
+                last_err = err
+                # 业务错误（4xx）不重试也不换域名，直接定性
+                if "HTTP 4" in err or (err and "HTTP " not in err):
+                    print("📢 Server酱 推送失败: %s" % err)
+                    return False
+                break   # 5xx：换下一个候选域名
+            except Exception as e:
+                msg = str(e)
+                last_err = msg[:100]
+                if attempt < 2:
+                    print("📢 Server酱 推送异常（第 %d/2 次）: %s，2s 后重试"
+                          % (attempt, msg[:70]))
+                    time.sleep(2)
+                    continue
+                break   # 换下一个候选域名
+        print("📢 Server酱 通道 %s 未送达: %s" % (host, last_err[:80]))
+
+    print("📢 Server酱 推送失败（所有通道均不通）: %s" % last_err[:100])
+    if "timed out" in last_err.lower() or "timeout" in last_err.lower():
+        print("   ↳ 提示：连不上 Server酱 —— 检查运行环境的网络/代理；"
+              "若用的是方糖(sctp)通道，push.ft07.com 可能已挂，脚本已自动回退主域名")
+    elif "Name or service not known" in last_err or "nodename nor servname" in last_err:
+        print("   ↳ 提示：域名解析失败 —— 检查运行环境的 DNS")
+    elif "Connection refused" in last_err:
+        print("   ↳ 提示：连接被拒 —— 目标可能不可达或被防火墙拦截")
     return False
 
 
@@ -3661,6 +3720,56 @@ def send_notify_all(title, content):
     return any(results)
 
 
+def _serverchan_diagnose():
+    """Server酱 自检：分别探测两个通道域名，定位是网络不通还是 key 有问题。
+
+    供 `--test-notify` 调用，也可在青龙里直接跑，方便区分
+    「环境连不上」和「SendKey 不对」这两类完全不同的故障。
+    """
+    key = os.environ.get("SERVERCHAN_SENDKEY", "").strip()
+    print("══ Server酱 通道自检 ══")
+    if not key:
+        print("❌ 未配置 SERVERCHAN_SENDKEY")
+        return False
+    print("SendKey: %s%s" % (key[:6], "*" * max(0, len(key) - 6)))
+    if key.startswith("sctp"):
+        uid = re.sub(r"^sctp(\d+)t.*$", r"\1", key)
+        urls = [("方糖通道", "https://%s.push.ft07.com/send/%s.send" % (uid, key)),
+                ("主域名兜底", "https://sctapi.ftqq.com/%s.send" % key)]
+    else:
+        urls = [("主域名", "https://sctapi.ftqq.com/%s.send" % key)]
+    any_ok = False
+    for name, url in urls:
+        host = re.sub(r"^https?://([^/]+).*$", r"\1", url)
+        t0 = time.time()
+        try:
+            s = requests.Session(); s.trust_env = False
+            r = s.post(url, data={"title": "WorkBuddy 通道自检", "desp": "自检消息，可忽略。"},
+                       timeout=(10, 30), verify=False)
+            el = time.time() - t0
+            try:
+                d = r.json()
+            except Exception:
+                d = {}
+            code = d.get("code")
+            if code == 0:
+                print("✅ %-10s %s -> 推送成功（%.2fs）" % (name, host, el))
+                any_ok = True
+            elif r.status_code >= 500:
+                print("❌ %-10s %s -> HTTP %s 服务端异常（%.2fs）" % (name, host, r.status_code, el))
+            else:
+                print("⚠️ %-10s %s -> HTTP %s code=%s %s（%.2fs）"
+                      % (name, host, r.status_code, code,
+                         str(d.get("message") or d.get("error") or "")[:50], el))
+        except Exception as e:
+            print("❌ %-10s %s -> 连不上：%s（%.2fs）" % (name, host, str(e)[:70], time.time() - t0))
+    if any_ok:
+        print("💡 结论：通道可用。若签到时仍超时，多半是内容过大或对方接口偶发慢，稍后重试即可")
+    else:
+        print("💡 结论：所有通道都不通 —— 检查运行环境出网/代理；若别的渠道正常，多半是 Server酱 侧故障")
+    return any_ok
+
+
 def main():
     if "--refresh" in sys.argv:
         print("╔═══════════════════════════════════╗")
@@ -3672,6 +3781,12 @@ def main():
         else:
             print("⚠️ 无账号续期（检查 wb_refresh_tokens.json 是否存在）")
         print("📄 WORKBUDDY_ACCESS_TOKEN.txt 已同步更新")
+        return
+    if "--test-notify" in sys.argv:
+        print("╔═══════════════════════════════════╗")
+        print("║ 📢 推送通道自检                     ║")
+        print("╚═══════════════════════════════════╝")
+        _serverchan_diagnose()
         return
     print("╔════════════════════════════════════════╗")
     print("║ 🌱 WorkBuddy 全能脚本                  ║")
